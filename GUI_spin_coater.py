@@ -30,6 +30,10 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QColor
 
+from src.set_up import initialise_device
+from src.motor_commands import run_velocity
+
+
 # Try importing serial library (for connecting Arduino/Maxon)
 try:
     import serial
@@ -38,8 +42,6 @@ try:
 except ImportError:
     SERIAL_AVAILABLE = False
 
-
-# --- WORKER THREAD (Hardware Control) ---
 class MotorWorker(QThread):
     progress_update = pyqtSignal(str)
     finished = pyqtSignal()
@@ -51,82 +53,103 @@ class MotorWorker(QThread):
         self.simulation_mode = simulation_mode
         self.is_running = True
 
-        # --- HARDWARE CONFIGURATION ---
-        # Modify based on actual setup: Windows usually 'COM3', Mac usually '/dev/tty.usbmodem...'
-        self.port = 'COM3'
-        self.baud_rate = 9600
-        self.ser = None
+        self.ctx = None  # EPOS context
 
     def run(self):
-        self.progress_update.emit("Initializing...")
+        self.progress_update.emit("Initializing motor...")
 
-        # 1. Connect Hardware
+        # -------------------------
+        # Initialize EPOS
+        # -------------------------
         if not self.simulation_mode:
-            if not SERIAL_AVAILABLE:
-                self.progress_update.emit("Error: pyserial not installed!")
-                self.finished.emit()
-                return
             try:
-                self.ser = serial.Serial(self.port, self.baud_rate, timeout=1)
-                time.sleep(2)  # Wait for Arduino to reset
-                self.progress_update.emit(f"Connected to {self.port}")
+                self.ctx = initialise_device(mode="velocity")
+                self.progress_update.emit("EPOS connected (Velocity Mode)")
             except Exception as e:
-                self.progress_update.emit(f"Connection Error: {str(e)}")
+                self.progress_update.emit(f"Motor init failed: {e}")
                 self.finished.emit()
                 return
+        else:
+            self.progress_update.emit("Simulation mode enabled")
 
-        total_loops = self.loop_count
-
-        # 2. Execution Loop
-        for current_loop in range(1, total_loops + 1):
-            if not self.is_running: break
+        # -------------------------
+        # Execute recipe loops
+        # -------------------------
+        for loop_idx in range(1, self.loop_count + 1):
+            if not self.is_running:
+                break
 
             for step in self.recipe_steps:
-                if not self.is_running: break
+                if not self.is_running:
+                    break
 
-                step_type = step.get('type', 'spin')
-                name = step.get('name', 'Step')
-                duration = step['duration']
-                prefix = f"Loop {current_loop}/{total_loops} | {name}"
+                step_type = step.get("type", "spin")
+                name = step.get("name", "Step")
+                prefix = f"Loop {loop_idx}/{self.loop_count} | {name}"
 
-                # --- WAIT STEP ---
-                if step_type == 'wait':
-                    # Stop motor during wait
-                    if not self.simulation_mode and self.ser:
-                        self.ser.write(b"SPEED:0\n")
+                # -------------------------
+                # WAIT STEP
+                # -------------------------
+                if step_type == "wait":
+                    duration = step["duration"]
+
+                    self.progress_update.emit(f"{prefix}: Waiting {duration}s")
+
+                    if not self.simulation_mode:
+                        run_velocity(self.ctx, 0)
 
                     for t in range(duration, 0, -1):
-                        if not self.is_running: break
-                        self.progress_update.emit(f"{prefix}: WAITING {t}s...")
+                        if not self.is_running:
+                            break
+                        self.progress_update.emit(f"{prefix}: WAIT {t}s")
                         self.sleep(1)
 
-                # --- SPIN STEP ---
+                # -------------------------
+                # SPIN STEP (VELOCITY)
+                # -------------------------
                 else:
-                    speed = step['speed']
-                    # Send command to Arduino
-                    if not self.simulation_mode and self.ser:
-                        # Protocol format: "SPEED:3000\n"
-                        cmd = f"SPEED:{speed}\n"
-                        self.ser.write(cmd.encode('utf-8'))
+                    rpm = step["speed"]
+                    duration = step["duration"]
 
-                    self.progress_update.emit(f"{prefix}: Ramping to {speed} RPM...")
-                    self.sleep(1)  # Simulate acceleration time
+                    self.progress_update.emit(
+                        f"{prefix}: Running {rpm} RPM for {duration}s"
+                    )
+
+                    if not self.simulation_mode:
+                        run_velocity(self.ctx, rpm)
 
                     for t in range(duration, 0, -1):
-                        if not self.is_running: break
-                        self.progress_update.emit(f"{prefix}: Spinning {speed} RPM ({t}s left)")
+                        if not self.is_running:
+                            break
+                        self.progress_update.emit(
+                            f"{prefix}: {rpm} RPM ({t}s left)"
+                        )
                         self.sleep(1)
 
-        # 3. Finish and Stop
-        if not self.simulation_mode and self.ser:
-            self.ser.write(b"SPEED:0\n")
-            self.ser.close()
+                    # Stop motor after step
+                    if not self.simulation_mode:
+                        run_velocity(self.ctx, 0)
 
-        self.progress_update.emit("Process Complete.")
+        # -------------------------
+        # Shutdown
+        # -------------------------
+        if not self.simulation_mode and self.ctx:
+            try:
+                run_velocity(self.ctx, 0)
+            except Exception:
+                pass
+
+        self.progress_update.emit("Process complete.")
         self.finished.emit()
 
     def stop(self):
+        """Emergency stop"""
         self.is_running = False
+        try:
+            if self.ctx:
+                run_velocity(self.ctx, 0)
+        except Exception:
+            pass
 
 
 # --- MAIN GUI WINDOW ---

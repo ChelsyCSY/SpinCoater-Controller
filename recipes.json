@@ -1,0 +1,18 @@
+{
+    "59a098f9-2d55-448b-82e0-d89d469c6f07": {
+        "name": "First Test",
+        "speed": 100,
+        "duration": 10,
+        "acceleration": 0,
+        "author": "Tim",
+        "shared": false
+    },
+    "71e41a6d-53e2-4f93-b4f3-c04367f08bb7": {
+        "name": "First Test",
+        "speed": 100,
+        "duration": 10,
+        "acceleration": 0,
+        "author": "Tim",
+        "shared": true
+    }
+}
